@@ -1,0 +1,95 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: eeg-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: eeg_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: eeg-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: eeg-backend
+    ports:
+      - "5000:5000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/eeg_db
+      - DATABASE_URL_SYNC=postgresql://postgres:postgres@postgres:5432/eeg_db
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=change-this-secret-key-in-production-32chars
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:5173
+      - MODEL_PATH=./models/CHB_MIT_sz_detec_demo.h5
+      - UPLOAD_DIR=./uploads
+      - DEBUG=true
+    volumes:
+      - ./backend:/app
+      - ./CHB_MIT_sz_detec_demo.h5:/app/models/CHB_MIT_sz_detec_demo.h5
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "uvicorn app.main:app --host 0.0.0.0 --port 5000 --reload"
+
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: eeg-celery
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/eeg_db
+      - DATABASE_URL_SYNC=postgresql://postgres:postgres@postgres:5432/eeg_db
+      - REDIS_URL=redis://redis:6379/0
+      - MODEL_PATH=./models/CHB_MIT_sz_detec_demo.h5
+      - UPLOAD_DIR=./uploads
+    volumes:
+      - ./backend:/app
+      - ./CHB_MIT_sz_detec_demo.h5:/app/models/CHB_MIT_sz_detec_demo.h5
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "celery -A app.tasks.celery_tasks.celery_app worker --loglevel=info --concurrency=1"
+
+  frontend:
+    image: node:18-alpine
+    container_name: eeg-frontend
+    ports:
+      - "3000:3000"
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+    depends_on:
+      - backend
+    command: >
+      sh -c "npm install && npm run start"
+
+volumes:
+  postgres_data:
